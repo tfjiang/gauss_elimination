@@ -1,0 +1,12 @@
+Gauss_eliminator r0.1
+=====================
+
+1. This tool is used to solve linear equations, while the equation number will increase dynamically. This tool will update all variants after adding each equation. Copy the "gauss_eliminator.h" anywhere you want.
+
+2. Build Example:
+   cd example
+   mkdir build
+   cmake ../
+   make
+
+3. Please feel free to contact me(jtf198711@gmail.com) if you have any suggestion. 
