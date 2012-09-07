@@ -9,6 +9,8 @@
 #include <boost/unordered_map.hpp>
 #include <boost/static_assert.hpp>
 #include <boost/type_traits/is_same.hpp>
+#include <boost/dynamic_bitset.hpp>
+//#include <zjucad/matrix/matrix.h>
 
 namespace jtf{
 namespace algorithm{
@@ -23,7 +25,10 @@ class expression{
 public:
   expression():index(-1),coefficient(0){}
   expression(const size_t & index_, const T & coefficient_)
-    : index(index_), coefficient(coefficient_){}
+    : index(index_), coefficient(coefficient_){
+    if(static_cast<int>(index_) < 0)
+      std::cerr << "# [error] this index is negative." << std::endl;
+  }
   size_t index;
   T coefficient;
   /**
@@ -95,7 +100,7 @@ public:
    *
    * @param node_idx input node idx
    * @param node_value input node value
-   * @return int
+   * @return int if nothing change return 0, or return changes number
    */
   int update(const size_t & node_idx, const  T & node_value);
   /**
@@ -123,13 +128,6 @@ public:
    * @return int
    */
   int normalization();
-
-  /**
-   * @brief get the equation value
-   *
-   * @return const T
-   */
-  const T& get_value() const {return value_;}
 
   /**
    * @brief get the state of equation:
@@ -160,13 +158,13 @@ public:
      * @return equation<T>
      */
   friend std::ostream& operator << (std::ostream &output,
-                             const equation<T> &eq)
+                                    const equation<T> &eq)
   {
     if(eq.e_vec_.empty()){
       output << "# ------ empty expressions with value = " << eq.value() << std::endl;
     }else{
       output << "# ------ SUM coeff * index , val" << std::endl
-           << "# ------ ";
+             << "# ------ ";
       for(equation<T>::eq_const_iterator eqcit = eq.begin(); eqcit != eq.end();){
         const expression<T> & exp = *eqcit;
         output << exp.coefficient << "*X" << exp.index;
@@ -188,15 +186,20 @@ public:
    * @return size_t
    */
   size_t get_prim_idx() const {
-    return e_vec_.front().index;
+    if(e_vec_.empty())
+      return -1;
+    else
+      return e_vec_.front().index;
   }
 
   int add_expression(const expression<T> & exp){
     e_vec_.push_back(exp);
     return 0;
   }
+
   T& value() {return value_;}
   const T& value() const {return value_;}
+
   std::list<expression<T> > e_vec_;
 private:
   T value_;
@@ -309,16 +312,18 @@ equation<T> & equation<T>::operator -= (const equation<T> & b )
 template <typename T>
 int equation<T>::update(const size_t & node_idx, const  T & node_value)
 {
+  int changes = 0;
   for(typename std::list<expression<T> >::iterator leit = e_vec_.begin();
       leit != e_vec_.end();){
     expression<T> & exp = *leit;
     if(exp.index == node_idx){
       value() -= exp.coefficient * node_value;
       e_vec_.erase(leit++);
+      ++changes;
     }
     ++leit;
   }
-  return 0;
+  return changes;
 }
 
 //! @brief this class only handle Ai+Bi=Ci
@@ -335,8 +340,9 @@ public:
  * @param node_flag input node_flag which will be tagged as true if the
  *        corresponding node is known
  */
- gauss_eliminator(std::vector<T> & nodes,
-                  std::vector<bool> & node_flag)
+  gauss_eliminator(std::vector<T> & nodes,
+                   boost::dynamic_bitset<> & node_flag)
+  //std::vector<bool> & node_flag)
     :nodes_(nodes), node_flag_(node_flag){
     idx2equation_.resize(nodes_.size());
   }
@@ -367,9 +373,18 @@ public:
    */
   int update_equation(equation<T> & eq);
 
+  /**
+   * @brief This function is used to check the gauss_elimination is valid or not.
+   *        Warning!!! This function costs a lot.
+   *
+   * @param eq input equation
+   * @return int
+   */
+  bool is_valid()const;
+
 private:
   std::vector<T> & nodes_;
-  std::vector<bool> & node_flag_;
+  boost::dynamic_bitset<> & node_flag_;
   std::list<equation<T> > es;
 
   typedef typename std::list<equation<T> >::iterator equation_ptr;
@@ -378,6 +393,10 @@ private:
   // this map store the smallest expression
   typedef typename std::map<size_t, std::list<equation_ptr> >::iterator prime_eq_ptr;
   std::map<size_t, std::list<equation_ptr> > prime_idx2equation_;
+private:
+
+  int gather_variant_index_of_equation(const equation<T> & eq,
+                                       std::vector<size_t> & gather)const;
 };
 
 template <typename T>
@@ -402,8 +421,8 @@ int gauss_eliminator<T>::add_equation(const equation<T> & e){
   }
   e_back.standardization();
 
-  for(typename equation<T>::eq_const_iterator it = e.begin();
-      it != e.end(); ++it){
+  for(typename equation<T>::eq_const_iterator it = e_back.begin();
+      it != e_back.end(); ++it){
     equation_ptr end_ptr = es.end();
     idx2equation_[it->index].push_back(--end_ptr);
   }
@@ -431,9 +450,71 @@ int gauss_eliminator<T>::update_equation(equation<T> & eq)
 }
 
 template <typename T>
+bool gauss_eliminator<T>::is_valid()const
+{
+  // check idx2equations
+  for(size_t pi = 0; pi < idx2equation_.size(); ++pi){
+    const std::list<equation_ptr> & node_link_eq = idx2equation_[pi];
+    if(node_link_eq.empty()) continue;
+    {
+      for(typename std::list<equation_ptr>::const_iterator cit =
+          node_link_eq.begin(); cit != node_link_eq.end(); ++cit){
+        const equation<T> & eq = *(*cit);
+        //size_t ei = 0;
+        typename std::list<expression<T> >::const_iterator lecit =
+            eq.e_vec_.begin();
+        for(; lecit != eq.e_vec_.end(); ++lecit){
+          if(lecit->index == pi)
+            break;
+        }
+        if(lecit == eq.e_vec_.end()) {
+          std::cerr << "# [error] can not find node " << pi
+                    <<  " in its linking equations." << std::endl;
+          return false;
+        }
+      }
+    }
+  }
+
+  typedef typename std::map<size_t, std::list<equation_ptr> >::const_iterator mslcit;
+  for(mslcit it = prime_idx2equation_.begin(); it != prime_idx2equation_.end();
+      ++it){
+    const std::list<equation_ptr> & node_link_eq = it->second;
+    const std::list<equation_ptr> & node_link_in_vec = idx2equation_[it->first];
+    const size_t &node_idx = it->first;
+    if(node_link_eq.empty()) continue;
+    {
+      for(typename std::list<equation_ptr>::const_iterator lcit =
+          node_link_eq.begin(); lcit != node_link_eq.end(); ++lcit){
+        if(find(node_link_in_vec.begin(), node_link_in_vec.end(), *lcit)
+           == node_link_in_vec.end()){
+          std::cerr << "# [error] can not find node " << node_idx
+                    <<  " in its linking equations." << std::endl;
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+
+template <typename T>
+int gauss_eliminator<T>::gather_variant_index_of_equation(
+    const equation<T> & eq, std::vector<size_t> & gather) const
+{
+  gather.clear();
+  for(typename std::list<expression<T> >::const_iterator it = eq.e_vec_.begin();
+      it !=  eq.e_vec_.end(); ++it){
+    const expression<T> & exp = *it;
+    gather.push_back(exp.index);
+  }
+  return 0;
+}
+
+template <typename T>
 int gauss_eliminator<T>::eliminate()
 {
-  std::cerr << std::endl;
   while(1){
     bool is_modified = false;
 
@@ -449,7 +530,9 @@ int gauss_eliminator<T>::eliminate()
         const int state_ = dle.front()->state();
         if(state_ == 0) { // cleared
           es.erase(dle.front());
-          continue;
+          prime_idx2equation_.erase(ptr);
+          is_modified = true;
+          break;
         }else if(state_ == -1){ // conflict equation
           std::cerr << "# [error] conflict equation " << std::endl;
           return __LINE__;
@@ -472,12 +555,12 @@ int gauss_eliminator<T>::eliminate()
             node_flag_[index] = true;
             std::list<equation_ptr> & node_linked_eq = idx2equation_[index];
             for(typename std::list<equation_ptr>::iterator leqit =
-                node_linked_eq.begin(); leqit != node_linked_eq.end(); ++leqit){
+                node_linked_eq.begin(); leqit != node_linked_eq.end();){
               equation<T> & eq = *(*leqit);
-              eq.update(index, nodes_[index]);
+              node_linked_eq.erase(leqit++);
               eq.standardization();
             }
-            node_linked_eq.clear();
+            //node_linked_eq.clear();
             prime_idx2equation_.erase(ptr);
             is_modified = true;
           }
@@ -492,13 +575,61 @@ int gauss_eliminator<T>::eliminate()
         // to keep each prime index linked only one equation
         for(typename std::list<equation_ptr>::iterator next = begin;
             next != dle.end();){
+
+          // gather all index which belong to *next equation,
+          // and check if these will change after minus operation
+          std::vector<size_t> index_collec_prev;
+          gather_variant_index_of_equation(*(*next), index_collec_prev);
+
           // to eliminate the prime index, each equation minus the first one
           *(*next) -= *(*first);
           (*next)->standardization();
-          const size_t prim_index = (*next)->get_prim_idx();
-          assert(prim_index >= (*first)->get_prim_idx());
-          prime_idx2equation_[prim_index].push_back(*next);
-          dle.erase(next++);
+
+          std::vector<size_t> index_collec_after;
+          gather_variant_index_of_equation(*(*next), index_collec_after);
+
+          // if an variant which belongs to next, and vanish after minus operation,
+          // should remove the equation linking from idx2equations
+          for(size_t idx = 0; idx < index_collec_prev.size(); ++idx){
+            if(find(index_collec_after.begin(),
+                    index_collec_after.end(),
+                    index_collec_prev[idx]) == index_collec_after.end())
+            {
+              std::list<equation_ptr> & node_linked_eq =
+                  idx2equation_[index_collec_prev[idx]];//.erase((*next));
+              typename std::list<equation_ptr>::iterator leqit =
+                  find(node_linked_eq.begin(),
+                       node_linked_eq.end(),(*next));
+              if(leqit == node_linked_eq.end()){
+                std::cerr << "# [error] can not find this equation of node "
+                          << index_collec_prev[idx] << std::endl;
+                return __LINE__;
+              }else
+                node_linked_eq.erase(leqit);
+            }
+          }
+
+          // if an variant which belong to first, and exist in next after minus
+          // operation, should add them into the idx2equations
+          for(size_t idx = 0; idx < index_collec_after.size(); ++idx){
+            if(find(index_collec_prev.begin(), index_collec_prev.end(),
+                    index_collec_after[idx]) == index_collec_prev.end()){
+              idx2equation_[index_collec_after[idx]].push_back(*next);
+            }
+          }
+
+          if((*next)->state() == 0) {// empty equation
+            dle.erase(next++);
+          }else{
+            const size_t prim_index = (*next)->get_prim_idx();
+            if(prim_index > (*first)->get_prim_idx()){
+              prime_idx2equation_[prim_index].push_back(*next);
+              dle.erase(next++);
+            }else{
+              assert(prim_index == (*first)->get_prim_idx());
+              ++next;
+            }
+          }
         }
         ++ptr;
       } // end else

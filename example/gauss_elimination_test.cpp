@@ -11,7 +11,7 @@ int main()
 {
   typedef double val_type;
   vector<val_type> node(4,0);
-  vector<bool> node_flag(4,false);
+  boost::dynamic_bitset<> node_flag(4);
 
   jtf::algorithm::gauss_eliminator<val_type> ge(node, node_flag);
 
