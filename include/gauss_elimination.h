@@ -185,7 +185,7 @@ public:
    *
    * @return size_t
    */
-  size_t get_prim_idx() const {
+  size_t get_prime_idx() const {
     if(e_vec_.empty())
       return -1;
     else
@@ -323,6 +323,8 @@ int equation<T>::update(const size_t & node_idx, const  T & node_value)
     }
     ++leit;
   }
+
+  standardization();
   return changes;
 }
 
@@ -332,6 +334,8 @@ class gauss_eliminator{
   BOOST_MPL_ASSERT_MSG((boost::is_same<T,double>::value ) ||
                        (boost::is_same<T,float>::value ),
                        NON_FLOAT_TYPES_ARE_NOT_ALLOWED, (void));
+  typedef typename std::list<equation<T> >::iterator equation_ptr;
+  typedef typename std::map<size_t, std::list<equation_ptr> >::iterator prime_eq_ptr;
 public:
   /**
  * @brief construct gauss_eliminator class
@@ -356,13 +360,19 @@ public:
    */
   int add_equation(const equation<T> & e);
 
+//  /**
+//   * @brief This function will start to eliminate equations above all added equations
+//   *
+//   * @return int return 0 if works fine, or return non-zeros
+//   */
+//  int eliminate();
+
   /**
    * @brief This function will start to eliminate equations above all added equations
    *
    * @return int return 0 if works fine, or return non-zeros
    */
-  int eliminate();
-
+  int eliminate_fast(const size_t & prime_idx);
 
   /**
    * @brief update the equation, it will check all variant, if a variant is
@@ -373,6 +383,15 @@ public:
    */
   int update_equation(equation<T> & eq);
 
+  /**
+   * @brief update state one equation, which only contains one unknown variant,
+   *        calculate this variant, and  update all corresonding equations, and
+   *        idx2equations_, prime_idx2equations_. This step whould be recursion
+   *
+   * @param eq_ptr input equation ptr
+   * @return int return 0 if nothing changes, or retunr 1;
+   */
+  int update_state_one_eqn(const equation_ptr & eq_ptr);
   /**
    * @brief This function is used to check the gauss_elimination is valid or not.
    *        Warning!!! This function costs a lot.
@@ -387,11 +406,9 @@ private:
   boost::dynamic_bitset<> & node_flag_;
   std::list<equation<T> > es;
 
-  typedef typename std::list<equation<T> >::iterator equation_ptr;
   std::vector<std::list<equation_ptr> > idx2equation_;
 
   // this map store the smallest expression
-  typedef typename std::map<size_t, std::list<equation_ptr> >::iterator prime_eq_ptr;
   std::map<size_t, std::list<equation_ptr> > prime_idx2equation_;
 private:
 
@@ -428,8 +445,71 @@ int gauss_eliminator<T>::add_equation(const equation<T> & e){
   }
 
   equation_ptr end_ptr = es.end();
-  prime_idx2equation_[e_back.get_prim_idx()].push_back(--end_ptr);
-  eliminate();
+  prime_idx2equation_[e_back.get_prime_idx()].push_back(--end_ptr);
+  //eliminate();
+  if(e_back.state() == 1) {// only one_variant
+    update_state_one_eqn(end_ptr);
+  }else{
+    assert(e_back.state() == 2);
+    eliminate_fast(e_back.get_prime_idx());
+  }
+  return 0;
+}
+
+template <typename T>
+int gauss_eliminator<T>::update_state_one_eqn(const equation_ptr & eq_ptr)
+{
+  assert(eq_ptr->state() == 1); // this equation only has one unknown variant
+
+  const size_t  prime_index = eq_ptr->get_prime_idx();
+  const T& value = eq_ptr->value();
+  assert(fabs((*eq_ptr).e_vec_.front().coefficient -1) < 1e-6);
+
+  if(node_flag_[prime_index]){
+    if(fabs(nodes_[prime_index] - value) > 1e-6){
+      std::cerr << "# [error] confict node " << prime_index
+                <<  "has different values " << nodes_[prime_index]
+                 << "," << value << "." << std::endl;
+      return __LINE__;
+    }else
+      return 0;
+  }else{
+    nodes_[prime_index] = value;
+    node_flag_[prime_index] = true;
+
+    // update corresponding equations of idx2equations
+    std::list<equation_ptr>& leq = idx2equation_[prime_index];
+    for(typename std::list<equation_ptr>::iterator leit = leq.begin();
+        leit != leq.end(); ++leit){
+      (*leit)->update(prime_index, nodes_[prime_index]);
+      const int state_ = (*leit)->state();
+      //assert(state_ == 1 || state_ == 2);
+      if(state_ == 1)
+        update_state_one_eqn((*leit));
+    }
+
+    leq.clear();
+
+    // update prime_idx2equations
+    typename std::map<size_t, std::list<equation_ptr> >::iterator it =
+        prime_idx2equation_.find(prime_index);
+    if(it != prime_idx2equation_.end()) {
+      std::list<equation_ptr> & lep = it->second;
+      assert(!lep.empty());
+      for(typename std::list<equation_ptr>::iterator leit = lep.begin();
+          leit != lep.end(); ++leit){
+        const int rtn = (*leit)->update(prime_index, nodes_[prime_index]);
+        // since previous updating already conver these equations,
+        // so there will be nothing changed
+        assert(rtn == 0);
+        const size_t prime_index_new = (*leit)->get_prime_idx();
+        assert(prime_index_new > prime_index);
+        prime_idx2equation_[prime_index_new].push_back(*leit);
+      }
+      prime_idx2equation_.erase(it);
+    }
+  }
+
   return 0;
 }
 
@@ -513,131 +593,237 @@ int gauss_eliminator<T>::gather_variant_index_of_equation(
 }
 
 template <typename T>
-int gauss_eliminator<T>::eliminate()
+int gauss_eliminator<T>::eliminate_fast(const size_t & prime_idx)
 {
-  while(1){
-    bool is_modified = false;
-
-    for(prime_eq_ptr ptr = prime_idx2equation_.begin();
-        ptr != prime_idx2equation_.end();)
-    {
-      std::list<equation_ptr> & dle = ptr->second;
-      if(dle.empty()) {
-        prime_idx2equation_.erase(ptr++);
-        is_modified = true;
-        continue;
-      }else if(dle.size() == 1){ // contain only one equation
-        const int state_ = dle.front()->state();
-        if(state_ == 0) { // cleared
-          es.erase(dle.front());
-          prime_idx2equation_.erase(ptr);
-          is_modified = true;
-          break;
-        }else if(state_ == -1){ // conflict equation
-          std::cerr << "# [error] conflict equation " << std::endl;
-          return __LINE__;
-        }else if(state_ == 1){ // finial variant
-          const equation<T> & eq = *dle.front();
-          const T &value_ = eq.value();
-          // prime index's coefficient should be 1
-          assert(fabs(eq.e_vec_.front().coefficient - 1) < 1e-6);
-          const size_t index = eq.get_prim_idx();
-          if(node_flag_[index]){
-            if(fabs(nodes_[index] - value_) > 1e-6){
-              std::cerr << "# [error] conficts happen, node " << index
-                        << " has different value " << nodes_[index] << ","
-                        << value_ << std::endl;
-              return __LINE__;
-            }
-          }else{
-            // update corresponding equations with the new node value
-            nodes_[index] = value_;
-            node_flag_[index] = true;
-            std::list<equation_ptr> & node_linked_eq = idx2equation_[index];
-            for(typename std::list<equation_ptr>::iterator leqit =
-                node_linked_eq.begin(); leqit != node_linked_eq.end();){
-              equation<T> & eq = *(*leqit);
-              node_linked_eq.erase(leqit++);
-              eq.standardization();
-            }
-            //node_linked_eq.clear();
-            prime_idx2equation_.erase(ptr);
-            is_modified = true;
-          }
-        }
-        ++ptr;
-      }else{
-        assert(dle.size() > 1);
-        // this prime_index point to several equations,
-        // which sould be eliminated
-        typename std::list<equation_ptr>::iterator begin = dle.begin();
-        typename std::list<equation_ptr>::iterator first = begin++;
-        // to keep each prime index linked only one equation
-        for(typename std::list<equation_ptr>::iterator next = begin;
-            next != dle.end();){
-
-          // gather all index which belong to *next equation,
-          // and check if these will change after minus operation
-          std::vector<size_t> index_collec_prev;
-          gather_variant_index_of_equation(*(*next), index_collec_prev);
-
-          // to eliminate the prime index, each equation minus the first one
-          *(*next) -= *(*first);
-          (*next)->standardization();
-
-          std::vector<size_t> index_collec_after;
-          gather_variant_index_of_equation(*(*next), index_collec_after);
-
-          // if an variant which belongs to next, and vanish after minus operation,
-          // should remove the equation linking from idx2equations
-          for(size_t idx = 0; idx < index_collec_prev.size(); ++idx){
-            if(find(index_collec_after.begin(),
-                    index_collec_after.end(),
-                    index_collec_prev[idx]) == index_collec_after.end())
-            {
-              std::list<equation_ptr> & node_linked_eq =
-                  idx2equation_[index_collec_prev[idx]];//.erase((*next));
-              typename std::list<equation_ptr>::iterator leqit =
-                  find(node_linked_eq.begin(),
-                       node_linked_eq.end(),(*next));
-              if(leqit == node_linked_eq.end()){
-                std::cerr << "# [error] can not find this equation of node "
-                          << index_collec_prev[idx] << std::endl;
-                return __LINE__;
-              }else
-                node_linked_eq.erase(leqit);
-            }
-          }
-
-          // if an variant which belong to first, and exist in next after minus
-          // operation, should add them into the idx2equations
-          for(size_t idx = 0; idx < index_collec_after.size(); ++idx){
-            if(find(index_collec_prev.begin(), index_collec_prev.end(),
-                    index_collec_after[idx]) == index_collec_prev.end()){
-              idx2equation_[index_collec_after[idx]].push_back(*next);
-            }
-          }
-
-          if((*next)->state() == 0) {// empty equation
-            dle.erase(next++);
-          }else{
-            const size_t prim_index = (*next)->get_prim_idx();
-            if(prim_index > (*first)->get_prim_idx()){
-              prime_idx2equation_[prim_index].push_back(*next);
-              dle.erase(next++);
-            }else{
-              assert(prim_index == (*first)->get_prim_idx());
-              ++next;
-            }
-          }
-        }
-        ++ptr;
-      } // end else
-    }
-    if(!is_modified) break;
+  assert(prime_idx < nodes_.size());
+  typedef typename std::map<size_t, std::list<equation_ptr> >::iterator mslit;
+  mslit it = prime_idx2equation_.find(prime_idx);
+  if(it == prime_idx2equation_.end()) {
+    std::cerr << "# [error] strange can not find prime_idx "
+              << prime_idx << "." << std::endl;
+    return __LINE__;
   }
+
+  std::list<equation_ptr> & linked_eqns = it->second;
+  assert(!linked_eqns.empty());
+  if(linked_eqns.size() == 1){
+    assert(linked_eqns.front()->state() == 1  ||
+           linked_eqns.front()->state() == 2); // only state 1/2 is acceptable
+    if(linked_eqns.front()->state() == 1){
+      const equation<T> & eq = *linked_eqns.front();
+      const T &value_ = eq.value();
+      assert(prime_idx == eq.get_prime_idx());
+      // prime index's coefficient should be 1
+      assert(fabs(eq.e_vec_.front().coefficient - 1) < 1e-6);
+      if(node_flag_[prime_idx]){
+        if(fabs(nodes_[prime_idx] - value_) > 1e-6){
+          std::cerr << "# [error] conficts happen, node " << prime_idx
+                    << " has different value " << nodes_[prime_idx] << ","
+                    << value_ << std::endl;
+          return __LINE__;
+        }
+      }else{
+        update_state_one_eqn(linked_eqns.front());
+      }
+    }
+  }else{
+    assert(linked_eqns.size() > 1);
+    typename std::list<equation_ptr>::iterator begin = linked_eqns.begin();
+    typename std::list<equation_ptr>::iterator first = begin++;
+    // to keep each prime index linked only one equation
+    for(typename std::list<equation_ptr>::iterator next = begin;
+        next != linked_eqns.end();){
+
+      // gather all index which belong to *next equation,
+      // and check if these will change after minus operation
+      std::vector<size_t> index_collec_prev;
+      gather_variant_index_of_equation(*(*next), index_collec_prev);
+
+      // to eliminate the prime index, each equation minus the first one
+      *(*next) -= *(*first);
+      (*next)->standardization();
+
+      std::vector<size_t> index_collec_after;
+      gather_variant_index_of_equation(*(*next), index_collec_after);
+
+      // if an variant which belongs to next, and vanish after minus operation,
+      // should remove the equation linking from idx2equations
+      for(size_t idx = 0; idx < index_collec_prev.size(); ++idx){
+        if(find(index_collec_after.begin(),
+                index_collec_after.end(),
+                index_collec_prev[idx]) == index_collec_after.end())
+        {
+          std::list<equation_ptr> & node_linked_eq =
+              idx2equation_[index_collec_prev[idx]];//.erase((*next));
+          typename std::list<equation_ptr>::iterator leqit =
+              find(node_linked_eq.begin(),
+                   node_linked_eq.end(),(*next));
+          if(leqit == node_linked_eq.end()){
+            std::cerr << "# [error] can not find this equation of node "
+                      << index_collec_prev[idx] << std::endl;
+            return __LINE__;
+          }else
+            node_linked_eq.erase(leqit);
+        }
+      }
+
+      // if an variant which belong to first, and exist in next after minus
+      // operation, should add them into the idx2equations
+      for(size_t idx = 0; idx < index_collec_after.size(); ++idx){
+        if(find(index_collec_prev.begin(), index_collec_prev.end(),
+                index_collec_after[idx]) == index_collec_prev.end()){
+          idx2equation_[index_collec_after[idx]].push_back(*next);
+        }
+      }
+
+      if((*next)->state() == 0) {// empty equation
+        linked_eqns.erase(next++);
+      }else{
+        const size_t prim_index = (*next)->get_prime_idx();
+        if(prim_index > (*first)->get_prime_idx()){
+          prime_idx2equation_[prim_index].push_back(*next);
+          linked_eqns.erase(next++);
+        }else{
+          assert(prim_index == (*first)->get_prime_idx());
+          ++next;
+        }
+      }
+    }
+  }
+
   return 0;
 }
+
+//template <typename T>
+//int gauss_eliminator<T>::eliminate()
+//{
+//  while(1){
+//    bool is_modified = false;
+
+//    for(prime_eq_ptr ptr = prime_idx2equation_.begin();
+//        ptr != prime_idx2equation_.end();)
+//    {
+//      std::list<equation_ptr> & dle = ptr->second;
+//      if(dle.empty()) {
+//        prime_idx2equation_.erase(ptr++);
+//        is_modified = true;
+//        continue;
+//      }else if(dle.size() == 1){ // contain only one equation
+//        const int state_ = dle.front()->state();
+//        if(state_ == 0) { // cleared
+//          es.erase(dle.front());
+//          prime_idx2equation_.erase(ptr++);
+//          is_modified = true;
+//          //break;
+//          continue;
+//        }else if(state_ == -1){ // conflict equation
+//          std::cerr << "# [error] conflict equation " << std::endl;
+//          return __LINE__;
+//        }else if(state_ == 1){ // finial variant
+//          const equation<T> & eq = *dle.front();
+//          const T &value_ = eq.value();
+//          // prime index's coefficient should be 1
+//          assert(fabs(eq.e_vec_.front().coefficient - 1) < 1e-6);
+//          const size_t index = eq.get_prime_idx();
+//          if(node_flag_[index]){
+//            if(fabs(nodes_[index] - value_) > 1e-6){
+//              std::cerr << "# [error] conficts happen, node " << index
+//                        << " has different value " << nodes_[index] << ","
+//                        << value_ << std::endl;
+//              return __LINE__;
+//            }
+//            ++ptr;
+//            continue;
+//          }else{
+//            // update corresponding equations with the new node value
+//            nodes_[index] = value_;
+//            node_flag_[index] = true;
+//            std::list<equation_ptr> & node_linked_eq = idx2equation_[index];
+//            for(typename std::list<equation_ptr>::iterator leqit =
+//                node_linked_eq.begin(); leqit != node_linked_eq.end();){
+//              equation<T> & eq = *(*leqit);
+//              node_linked_eq.erase(leqit++);
+//              eq.standardization();
+//            }
+//            //node_linked_eq.clear();
+//            prime_idx2equation_.erase(ptr++);
+//            is_modified = true;
+//            continue;
+//          }
+//        }else
+//          ++ptr;
+//      }else{
+//        assert(dle.size() > 1);
+//        // this prime_index point to several equations,
+//        // which sould be eliminated
+//        typename std::list<equation_ptr>::iterator begin = dle.begin();
+//        typename std::list<equation_ptr>::iterator first = begin++;
+//        // to keep each prime index linked only one equation
+//        for(typename std::list<equation_ptr>::iterator next = begin;
+//            next != dle.end();){
+
+//          // gather all index which belong to *next equation,
+//          // and check if these will change after minus operation
+//          std::vector<size_t> index_collec_prev;
+//          gather_variant_index_of_equation(*(*next), index_collec_prev);
+
+//          // to eliminate the prime index, each equation minus the first one
+//          *(*next) -= *(*first);
+//          (*next)->standardization();
+
+//          std::vector<size_t> index_collec_after;
+//          gather_variant_index_of_equation(*(*next), index_collec_after);
+
+//          // if an variant which belongs to next, and vanish after minus operation,
+//          // should remove the equation linking from idx2equations
+//          for(size_t idx = 0; idx < index_collec_prev.size(); ++idx){
+//            if(find(index_collec_after.begin(),
+//                    index_collec_after.end(),
+//                    index_collec_prev[idx]) == index_collec_after.end())
+//            {
+//              std::list<equation_ptr> & node_linked_eq =
+//                  idx2equation_[index_collec_prev[idx]];//.erase((*next));
+//              typename std::list<equation_ptr>::iterator leqit =
+//                  find(node_linked_eq.begin(),
+//                       node_linked_eq.end(),(*next));
+//              if(leqit == node_linked_eq.end()){
+//                std::cerr << "# [error] can not find this equation of node "
+//                          << index_collec_prev[idx] << std::endl;
+//                return __LINE__;
+//              }else
+//                node_linked_eq.erase(leqit);
+//            }
+//          }
+
+//          // if an variant which belong to first, and exist in next after minus
+//          // operation, should add them into the idx2equations
+//          for(size_t idx = 0; idx < index_collec_after.size(); ++idx){
+//            if(find(index_collec_prev.begin(), index_collec_prev.end(),
+//                    index_collec_after[idx]) == index_collec_prev.end()){
+//              idx2equation_[index_collec_after[idx]].push_back(*next);
+//            }
+//          }
+
+//          if((*next)->state() == 0) {// empty equation
+//            dle.erase(next++);
+//          }else{
+//            const size_t prim_index = (*next)->get_prime_idx();
+//            if(prim_index > (*first)->get_prime_idx()){
+//              prime_idx2equation_[prim_index].push_back(*next);
+//              dle.erase(next++);
+//            }else{
+//              assert(prim_index == (*first)->get_prime_idx());
+//              ++next;
+//            }
+//          }
+//        }
+//        ++ptr;
+//      } // end else
+//    }
+//    if(!is_modified) break;
+//  }
+//  return 0;
+//}
 }
 }
 #endif // GAUSS_ELIMINATION_H
